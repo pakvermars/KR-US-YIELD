@@ -54,7 +54,7 @@ table{width:100%;border-collapse:collapse}th,td{padding:10px 6px;border-bottom:1
   </div>
 </div>
 
-<div class="card wide"><b>10년물 추이</b><canvas id="history"></canvas></div>
+<div class="card wide"><b>최근 10년 한국·미국 기준금리 추이</b><div class="muted" style="font-size:12px;margin:6px 0 12px">미국은 Federal Funds Target Range의 중간값 기준</div><canvas id="policyHistory"></canvas></div>
 </div>
 <div id="updated" class="muted" style="margin-top:12px"></div><div id="err" class="err"></div>
 </div>
@@ -98,8 +98,35 @@ async function load(){
    tbody.insertAdjacentHTML("beforeend",`<tr><td>${m}</td><td>${fmt(k.value)}</td><td class="${cls(k.changeBp)}">${bp(k.changeBp)}</td><td>${fmt(u.value)}</td><td class="${cls(u.changeBp)}">${bp(u.changeBp)}</td><td>${bp(s)}</td></tr>`);});
   topDates.textContent=`데이터 기준일 · 한국 ${j.latestDates.kr||"-"} / 미국 ${j.latestDates.us||"-"}`;
   updated.textContent=`국채 데이터 출처: 한국은행 ECOS / U.S. Treasury · 한국 ${j.latestDates.kr||"-"} / 미국 ${j.latestDates.us||"-"}`;
-  const labels=[...new Set([...j.history.kr.map(x=>x.date),...j.history.us.map(x=>x.date)])].sort(),km=Object.fromEntries(j.history.kr.map(x=>[x.date,x.value])),um=Object.fromEntries(j.history.us.map(x=>[x.date,x.value]));
-  c2?.destroy();c2=new Chart(history,{type:"line",data:{labels,datasets:[{label:"한국 10Y",data:labels.map(d=>km[d]??null),spanGaps:true},{label:"미국 10Y",data:labels.map(d=>um[d]??null),spanGaps:true}]},options:{responsive:true}});
+  const pkr=j.policyHistory?.kr||[], pus=j.policyHistory?.us||[];
+  const pLabels=[...new Set([...pkr.map(x=>x.date),...pus.map(x=>x.date)])].sort();
+  function stepData(series){
+    if(!series.length) return pLabels.map(()=>null);
+    let idx=0,cur=null;
+    return pLabels.map(d=>{
+      while(idx<series.length && series[idx].date<=d){cur=series[idx].value;idx++;}
+      return cur;
+    });
+  }
+  c2?.destroy();
+  c2=new Chart(policyHistory,{
+    type:"line",
+    data:{
+      labels:pLabels,
+      datasets:[
+        {label:"한국 기준금리",data:stepData(pkr),stepped:true,spanGaps:true,pointRadius:2},
+        {label:j.policyHistory?.usLabel||"미국 기준금리",data:stepData(pus),stepped:true,spanGaps:true,pointRadius:2}
+      ]
+    },
+    options:{
+      responsive:true,
+      interaction:{mode:"index",intersect:false},
+      scales:{
+        x:{ticks:{maxTicksLimit:12}},
+        y:{title:{display:true,text:"기준금리(%)"}}
+      }
+    }
+  });
  }catch(e){err.textContent=e.message}
 }
 refresh.onclick=load;days.onchange=load;drawSchedules();load();

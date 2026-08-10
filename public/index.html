@@ -10,37 +10,80 @@ h1{margin:0}.muted{color:#6b7280}.grid{display:grid;grid-template-columns:1fr 1f
 button,select{padding:9px 12px;border:1px solid #d1d5db;border-radius:9px;background:#fff}
 table{width:100%;border-collapse:collapse}th,td{padding:10px 6px;border-bottom:1px solid #eee;text-align:right}th:first-child,td:first-child{text-align:left}
 .up{color:#b91c1c}.down{color:#1d4ed8}.big{font-size:28px;font-weight:700}.err{color:#b91c1c;margin-top:12px}
-@media(max-width:760px){.grid{grid-template-columns:1fr}.wide{grid-column:auto}table{font-size:12px}}
+.schedule-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}.schedule-list{margin:12px 0 0;padding:0;list-style:none}.schedule-list li{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid #eee}.schedule-list li:last-child{border-bottom:0}.done{color:#9ca3af}.next{font-weight:700}.tag{font-size:12px;padding:2px 7px;border-radius:999px;background:#eef2ff}
+@media(max-width:760px){.grid,.schedule-grid{grid-template-columns:1fr}.wide{grid-column:auto}table{font-size:12px}}
 </style></head>
 <body><div class="wrap">
 <div class="top"><div><h1>한·미 국채 금리 대시보드</h1><div class="muted">한국은행 ECOS · U.S. Treasury</div></div>
 <div><select id="days"><option value="30">30일</option><option value="90">90일</option><option value="365">1년</option></select> <button id="refresh">새로고침</button></div></div>
+
 <div class="grid">
-<div class="card"><b>10년물</b><div class="big" id="kr10">-</div><div>한국</div><br><div class="big" id="us10">-</div><div>미국</div></div>
+<div class="card"><b>30년물</b><div class="big" id="kr30">-</div><div>한국</div><br><div class="big" id="us30">-</div><div>미국</div></div>
 <div class="card"><b>주요 스프레드</b><div id="spreads" class="muted" style="margin-top:12px">조회 전</div></div>
+
 <div class="card wide"><b>현재 금리</b><table><thead><tr><th>만기</th><th>한국</th><th>전일비</th><th>미국</th><th>전일비</th><th>한-미</th></tr></thead><tbody id="tbody"></tbody></table></div>
-<div class="card wide"><b>수익률 곡선</b><canvas id="curve"></canvas></div>
+
+<div class="card wide">
+  <b>2026년 통화정책 일정</b>
+  <div class="schedule-grid">
+    <div>
+      <h3>미국 FOMC</h3>
+      <ul class="schedule-list" id="fomcList"></ul>
+    </div>
+    <div>
+      <h3>한국 금통위</h3>
+      <ul class="schedule-list" id="bokList"></ul>
+    </div>
+  </div>
+</div>
+
 <div class="card wide"><b>10년물 추이</b><canvas id="history"></canvas></div>
 </div>
 <div id="updated" class="muted" style="margin-top:12px"></div><div id="err" class="err"></div>
 </div>
+
 <script>
-const mats=["1Y","2Y","3Y","5Y","10Y","20Y","30Y"];let c1,c2;
+const mats=["1Y","2Y","3Y","5Y","10Y","20Y","30Y"];let c2;
 const fmt=v=>v==null?"-":Number(v).toFixed(3)+"%";const bp=v=>v==null?"-":(v>0?"+":"")+Number(v).toFixed(1)+"bp";
 const cls=v=>v>0?"up":v<0?"down":"";
+
+const fomc=[
+ ["2026-01-27","1월 27–28일"],["2026-03-17","3월 17–18일"],["2026-04-28","4월 28–29일"],["2026-06-16","6월 16–17일"],
+ ["2026-07-28","7월 28–29일"],["2026-09-15","9월 15–16일"],["2026-10-27","10월 27–28일"],["2026-12-08","12월 8–9일"]
+];
+const bok=[
+ ["2026-01-15","1월 15일"],["2026-02-26","2월 26일"],["2026-04-10","4월 10일"],["2026-05-28","5월 28일"],
+ ["2026-07-16","7월 16일"],["2026-08-27","8월 27일"],["2026-10-22","10월 22일"],["2026-11-26","11월 26일"]
+];
+
+function drawSchedules(){
+ const today=new Date(); today.setHours(0,0,0,0);
+ function draw(id,arr){
+   const el=document.getElementById(id); el.innerHTML="";
+   let nextMarked=false;
+   arr.forEach(([iso,label])=>{
+     const d=new Date(iso+"T00:00:00");
+     let state="", badge="";
+     if(d<today){state="done"; badge='<span class="tag">완료</span>'}
+     else if(!nextMarked){state="next"; badge='<span class="tag">다음</span>'; nextMarked=true}
+     el.insertAdjacentHTML("beforeend",`<li class="${state}"><span>${label}</span>${badge}</li>`);
+   });
+ }
+ draw("fomcList",fomc); draw("bokList",bok);
+}
+
 async function load(){
  err.textContent="";
  try{
   const r=await fetch("/api/yields?days="+days.value,{cache:"no-store"});const j=await r.json();if(!r.ok)throw Error(j.error||"조회 실패");
-  kr10.textContent=fmt(j.latest.kr["10Y"]?.value);us10.textContent=fmt(j.latest.us["10Y"]?.value);
+  kr30.textContent=fmt(j.latest.kr["30Y"]?.value);us30.textContent=fmt(j.latest.us["30Y"]?.value);
   tbody.innerHTML="";mats.forEach(m=>{const k=j.latest.kr[m]||{},u=j.latest.us[m]||{};const s=(k.value!=null&&u.value!=null)?(k.value-u.value)*100:null;
    tbody.insertAdjacentHTML("beforeend",`<tr><td>${m}</td><td>${fmt(k.value)}</td><td class="${cls(k.changeBp)}">${bp(k.changeBp)}</td><td>${fmt(u.value)}</td><td class="${cls(u.changeBp)}">${bp(u.changeBp)}</td><td>${bp(s)}</td></tr>`);});
   spreads.innerHTML=`한국 2Y-10Y: <b>${bp(j.spreads.kr2s10)}</b><br>미국 2Y-10Y: <b>${bp(j.spreads.us2s10)}</b><br>한국 3Y-10Y: <b>${bp(j.spreads.kr3s10)}</b><br>미국 3Y-10Y: <b>${bp(j.spreads.us3s10)}</b>`;
   updated.textContent=`기준일: 한국 ${j.latestDates.kr||"-"} / 미국 ${j.latestDates.us||"-"}`;
-  c1?.destroy();c1=new Chart(curve,{type:"line",data:{labels:mats,datasets:[{label:"한국",data:mats.map(m=>j.latest.kr[m]?.value??null)},{label:"미국",data:mats.map(m=>j.latest.us[m]?.value??null)}]},options:{responsive:true}});
   const labels=[...new Set([...j.history.kr.map(x=>x.date),...j.history.us.map(x=>x.date)])].sort(),km=Object.fromEntries(j.history.kr.map(x=>[x.date,x.value])),um=Object.fromEntries(j.history.us.map(x=>[x.date,x.value]));
   c2?.destroy();c2=new Chart(history,{type:"line",data:{labels,datasets:[{label:"한국 10Y",data:labels.map(d=>km[d]??null),spanGaps:true},{label:"미국 10Y",data:labels.map(d=>um[d]??null),spanGaps:true}]},options:{responsive:true}});
  }catch(e){err.textContent=e.message}
 }
-refresh.onclick=load;days.onchange=load;load();
+refresh.onclick=load;days.onchange=load;drawSchedules();load();
 </script></body></html>

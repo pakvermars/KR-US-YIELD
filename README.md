@@ -1,11 +1,11 @@
-# 한·미 국채 금리 웹 대시보드
+# 한·미 국채 금리 웹 대시보드 v2
 
-## Vercel 배포
-1. 이 폴더를 GitHub 저장소에 업로드
-2. Vercel에서 새 프로젝트로 해당 저장소 Import
-3. Settings → Environment Variables
-4. 이름 `ECOS_API_KEY`, 값은 한국은행 ECOS Open API 키
-5. Deploy
-6. 발급된 `*.vercel.app` 주소로 PC/아이폰에서 접속
+변경사항
+- 좌측 상단 10년물 → 30년물
+- 수익률 곡선 영역 삭제
+- 해당 영역에 2026년 미국 FOMC 일정 / 한국 금통위 통화정책방향 결정회의 일정 추가
+- 과거 일정은 '완료', 가장 가까운 향후 일정은 '다음'으로 자동 표시
 
-정적 HTML만 여는 방식이 아니라 `/api/yields` 서버리스 함수가 한국은행/미 재무부 API를 대신 호출합니다.
+배포
+기존 GitHub 저장소의 파일을 이 버전으로 교체하고 Commit하면 Vercel이 자동 재배포합니다.
+ECOS_API_KEY 환경변수는 기존 Vercel 프로젝트에 그대로 유지됩니다.

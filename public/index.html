@@ -27,13 +27,13 @@ table{width:100%;border-collapse:collapse}th,td{padding:10px 6px;border-bottom:1
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:16px">
     <div>
       <div class="muted">한국은행 기준금리</div>
-      <div class="big" style="margin-top:4px">2.75%</div>
-      <div class="muted" style="font-size:12px;margin-top:4px">2026-07-16 기준</div>
+      <div class="big" id="krPolicyRate" style="margin-top:4px">-</div>
+      <div class="muted" id="krPolicyDate" style="font-size:12px;margin-top:4px">최근 변경일 조회 중</div>
     </div>
     <div>
       <div class="muted">미 연준 기준금리</div>
-      <div class="big" style="margin-top:4px">3.75%</div>
-      <div class="muted" style="font-size:12px;margin-top:4px">Federal Funds Target Range 상단</div>
+      <div class="big" id="usPolicyRate" style="margin-top:4px">-</div>
+      <div class="muted" id="usPolicyDate" style="font-size:12px;margin-top:4px">Federal Funds Target Range 상단</div>
     </div>
   </div>
 </div>
@@ -54,7 +54,7 @@ table{width:100%;border-collapse:collapse}th,td{padding:10px 6px;border-bottom:1
   </div>
 </div>
 
-<div class="card wide"><b>최근 10년 한국·미국 기준금리 추이</b><div class="muted" style="font-size:12px;margin:6px 0 12px">미국은 Federal Funds Target Range 상단값 기준</div><canvas id="policyHistory"></canvas></div>
+<div class="card wide"><b>최근 30년 한국·미국 기준금리 추이</b><div class="muted" style="font-size:12px;margin:6px 0 12px">미국은 Federal Funds Target Range 상단값 기준</div><canvas id="policyHistory"></canvas></div>
 </div>
 <div id="updated" class="muted" style="margin-top:12px"></div><div id="err" class="err"></div>
 </div>
@@ -99,6 +99,15 @@ async function load(){
   topDates.textContent=`데이터 기준일 · 한국 ${j.latestDates.kr||"-"} / 미국 ${j.latestDates.us||"-"}`;
   updated.textContent=`국채 데이터 출처: 한국은행 ECOS / U.S. Treasury · 한국 ${j.latestDates.kr||"-"} / 미국 ${j.latestDates.us||"-"}`;
   const pkr=j.policyHistory?.kr||[], pus=j.policyHistory?.us||[];
+
+  // 상단 기준금리는 정책금리 이력의 마지막 값에서 자동 표시
+  const krCurrent=pkr.length?pkr[pkr.length-1]:null;
+  const usCurrent=pus.length?pus[pus.length-1]:null;
+  krPolicyRate.textContent=krCurrent?Number(krCurrent.value).toFixed(2)+"%":"-";
+  krPolicyDate.textContent=krCurrent?krCurrent.date+" 기준":"최근 변경일 없음";
+  usPolicyRate.textContent=usCurrent?Number(usCurrent.value).toFixed(2)+"%":"-";
+  usPolicyDate.textContent=usCurrent?(j.policyHistory?.usLabel||"미국 기준금리")+" · "+usCurrent.date:"Federal Funds Target Range 상단";
+
   const pLabels=[...new Set([...pkr.map(x=>x.date),...pus.map(x=>x.date)])].sort();
   function stepData(series){
     if(!series.length) return pLabels.map(()=>null);

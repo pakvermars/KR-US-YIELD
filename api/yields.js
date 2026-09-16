@@ -8,7 +8,7 @@ export default async function handler(req,res){
   if(krResult.status==="rejected") errors.push("한국: "+krResult.reason.message);
   if(usResult.status==="rejected") errors.push("미국: "+usResult.reason.message);
 
-  const policy = getPolicyHistory();
+  const policy = await getPolicyHistory();
   const mats=["1Y","2Y","3Y","5Y","10Y","20Y","30Y"],latest={kr:{},us:{}};
   for(const m of mats){latest.kr[m]=lt(kr[m]||[]);latest.us[m]=lt(us[m]||[])}
 
@@ -100,7 +100,97 @@ async function getUS(days){
  return out;
 }
 
-function getPolicyHistory(){
+async function getPolicyHistory(){
+  // 정책금리는 외부 공식 데이터에서 자동 갱신합니다.
+  // 한국: ECOS(한국은행 기준금리), 미국: FRED 30년 이력 + 최신 FOMC 성명 즉시 반영.
+  const fallback = getPolicyFallback();
+  const [krR, usR] = await Promise.allSettled([getKRPolicyHistory(), getUSPolicyHistory()]);
+  return {
+    kr: krR.status === "fulfilled" && krR.value.length ? krR.value : fallback.kr,
+    us: usR.status === "fulfilled" && usR.value.length ? usR.value : fallback.us,
+    usLabel:"미국 기준금리(목표범위 상단)"
+  };
+}
+
+async function getKRPolicyHistory(){
+  const key=process.env.ECOS_API_KEY;
+  if(!key) throw Error("ECOS_API_KEY가 없습니다.");
+  const end=new Date(), start=new Date(); start.setUTCFullYear(end.getUTCFullYear()-31);
+  const f=d=>d.toISOString().slice(0,10).replaceAll("-","");
+  // ECOS: 한국은행 기준금리 (통계표 722Y001 / 항목 0101000)
+  const u=`https://ecos.bok.or.kr/api/StatisticSearch/${encodeURIComponent(key)}/json/kr/1/10000/722Y001/D/${f(start)}/${f(end)}/0101000`;
+  const r=await fetch(u,{headers:{"User-Agent":"KR-US-Yield-Web/9.0"}});
+  if(!r.ok) throw Error(`ECOS 기준금리 HTTP ${r.status}`);
+  const j=await r.json();
+  if(j.RESULT) throw Error(`ECOS 기준금리 ${j.RESULT.MESSAGE||j.RESULT.CODE}`);
+  const daily=(j.StatisticSearch?.row||[]).map(x=>({
+    date:String(x.TIME).replace(/^(\d{4})(\d{2})(\d{2})$/,"$1-$2-$3"), value:Number(x.DATA_VALUE)
+  })).filter(x=>Number.isFinite(x.value)).sort((a,b)=>a.date.localeCompare(b.date));
+  return changesOnly(daily);
+}
+
+async function getUSPolicyHistory(){
+  const start=new Date(); start.setUTCFullYear(start.getUTCFullYear()-31);
+  const cosd=start.toISOString().slice(0,10);
+  // FRED의 Federal Funds Target Range - Upper Limit(DFEDTARU), API key 불필요 CSV.
+  const u=`https://fred.stlouisfed.org/graph/fredgraph.csv?id=DFEDTARU&cosd=${cosd}`;
+  const r=await fetch(u,{headers:{"User-Agent":"KR-US-Yield-Web/9.0"}});
+  if(!r.ok) throw Error(`FRED 기준금리 HTTP ${r.status}`);
+  const csv=await r.text();
+  const daily=csv.trim().split(/\r?\n/).slice(1).map(line=>{
+    const [date,val]=line.split(','); return {date,value:Number(val)};
+  }).filter(x=>/^\d{4}-\d{2}-\d{2}$/.test(x.date)&&Number.isFinite(x.value));
+  let hist=changesOnly(daily);
+
+  // FRED는 새 목표범위의 효력발생일 전에는 이전 값을 보일 수 있어,
+  // 최신 FOMC 성명을 공식 Fed 사이트에서 읽어 발표 즉시 상단값을 보완합니다.
+  try{
+    const latest=await getLatestFOMCTargetUpper();
+    if(latest && (!hist.length || latest.date>=hist.at(-1).date)){
+      if(!hist.length || hist.at(-1).value!==latest.value) hist.push(latest);
+      else if(latest.date>hist.at(-1).date) hist[hist.length-1]=latest;
+    }
+  }catch(_){ /* FRED 값은 계속 사용 */ }
+  return hist;
+}
+
+async function getLatestFOMCTargetUpper(){
+  const home=await fetch('https://www.federalreserve.gov/monetarypolicy.htm',{headers:{"User-Agent":"KR-US-Yield-Web/9.0"}});
+  if(!home.ok) throw Error('Fed monetary policy page failed');
+  const html=await home.text();
+  const links=[...html.matchAll(/href=["']([^"']*\/newsevents\/pressreleases\/monetary\d{8}a\.htm)["']/gi)]
+    .map(m=>m[1]);
+  if(!links.length) throw Error('Latest FOMC statement link not found');
+  const href=links[0].startsWith('http')?links[0]:`https://www.federalreserve.gov${links[0]}`;
+  const rr=await fetch(href,{headers:{"User-Agent":"KR-US-Yield-Web/9.0"}});
+  if(!rr.ok) throw Error('Latest FOMC statement failed');
+  const text=(await rr.text()).replace(/<[^>]+>/g,' ').replace(/&frasl;|&#8260;/g,'/').replace(/&ndash;|&#8211;/g,'-').replace(/&nbsp;/g,' ');
+  const dm=href.match(/monetary(\d{4})(\d{2})(\d{2})a\.htm/i);
+  const date=dm?`${dm[1]}-${dm[2]}-${dm[3]}`:new Date().toISOString().slice(0,10);
+  const m=text.match(/target range[\s\S]{0,180}?to\s+([0-9]+(?:\s*[- ]\s*[0-9]+\/[0-9]+)?|[0-9]+(?:\.[0-9]+)?)\s*(?:percent|per cent)/i);
+  if(!m) throw Error('FOMC target range parse failed');
+  return {date,value:parseRate(m[1])};
+}
+
+function parseRate(s){
+  s=String(s).trim().replace(/\s+/g,' ');
+  const mixed=s.match(/^(\d+)\s*[- ]\s*(\d+)\/(\d+)$/);
+  if(mixed) return Number(mixed[1])+Number(mixed[2])/Number(mixed[3]);
+  const frac=s.match(/^(\d+)\/(\d+)$/);
+  if(frac) return Number(frac[1])/Number(frac[2]);
+  return Number(s);
+}
+
+function changesOnly(rows){
+  const out=[]; let prev;
+  for(const x of rows){
+    if(!Number.isFinite(x.value)) continue;
+    if(prev===undefined || x.value!==prev){ out.push({date:x.date,value:x.value}); prev=x.value; }
+  }
+  return out;
+}
+
+function getPolicyFallback(){
   // 최근 30년 정책금리 추이(1996-08-10 이후).
   // 한국: 콜금리 목표제/기준금리 체계의 대표 정책금리 변경 이력.
   // 미국: Federal Funds Target Range 상단값 기준.

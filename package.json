@@ -1,5 +1,8 @@
 {
   "name": "kr-us-yield-dashboard",
+  "scripts": {
+    "test": "node test/api-yields.test.mjs"
+  },
   "version": "7.0.0",
   "private": true
 }

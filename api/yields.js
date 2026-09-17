@@ -116,7 +116,8 @@ async function getPolicyHistory(){
     return{...fb,krSource:"fallback",usSource:"fallback",diag:{window:ws,kr:{ok:false,error:e.message},us:{ok:false,error:e.message}}};
   }
   const krOk=!!(kr.ok&&kr.value.length);
-  const usOk=!!(us.ok&&(us.value.windowRows.length||us.value.statements.length));
+  // 새 변경이 없어 0건이어도 소스가 응답했다면 최신 상태가 확인된 것입니다.
+  const usOk=!!us.ok;
   return{
     kr:krOk?mergePolicy(fb.kr,kr.value,ws,null):fb.kr,
     us:usOk?mergePolicy(fb.us,us.value.windowRows,ws,us.value.statements):fb.us,
@@ -157,7 +158,7 @@ async function getUSPolicyHistory(ws,afterDate){
   ]);
   const windowRows=fredR.status==="fulfilled"?[...fredR.value]:[];
   const statements=stmtR.status==="fulfilled"?stmtR.value:[];
-  if(!windowRows.length&&!statements.length)throw Error(`FRED: ${fredR.reason?.message}; FOMC: ${stmtR.reason?.message}`);
+  if(fredR.status!=="fulfilled"&&stmtR.status!=="fulfilled")throw Error(`FRED: ${fredR.reason?.message}; FOMC: ${stmtR.reason?.message}`);
   return{windowRows,statements,
     fred:fredR.status==="fulfilled"?`${fredR.value.length}건`:`실패: ${fredR.reason?.message}`,
     fomc:stmtR.status==="fulfilled"
@@ -363,7 +364,8 @@ function getPolicyFallback(){
     ["2024-12-18",4.50],
     ["2025-09-17",4.25],
     ["2025-10-29",4.00],
-    ["2025-12-10",3.75]
+    ["2025-12-10",3.75],
+    ["2026-09-16",4.00]
   ].map(([date,value])=>({date,value}));
 
   return {kr,us,usLabel:"미국 기준금리(목표범위 상단)"};

@@ -1,5 +1,5 @@
 // 타임아웃 예산(ms). 모든 외부 호출은 반드시 이 안에서 끝나거나 중단됩니다.
-const T={ecosYield:8000,treasury:8000,ecosPolicy:6000,fred:6000,fedPage:4000,fedEnrich:8000,policyAll:14000};
+const T={ecosYield:8000,treasury:8000,ecosPolicy:9000,fred:9000,fedPage:6000,fedEnrich:13000,policyAll:20000};
 
 // 응답하지 않고 매달리는 업스트림을 확실히 끊습니다.
 // AbortSignal.timeout 이 없으면 try/catch 가 영원히 발동하지 않습니다.
@@ -9,6 +9,15 @@ async function fetchT(url,opts={},ms=8000,label="요청"){
   }catch(e){
     if(e?.name==="TimeoutError"||e?.name==="AbortError")throw Error(`${label} 시간 초과(${ms}ms)`);
     throw Error(`${label} 실패: ${e?.message||e}`);
+  }
+}
+
+// 본문 수신(r.json()/r.text())도 시그널에 의해 중단될 수 있습니다.
+// fetchT 는 헤더까지만 보호하므로 본문은 따로 감싸 사유를 남깁니다.
+async function bodyT(p,label){
+  try{return await p}catch(e){
+    if(e?.name==="TimeoutError"||e?.name==="AbortError")throw Error(`${label} 본문 수신 시간 초과`);
+    throw Error(`${label} 본문 오류: ${e?.message||e}`);
   }
 }
 
@@ -50,7 +59,7 @@ async function getKR(days){
   const jobs=Object.entries(codes).map(async([m,c])=>{
     const u=`https://ecos.bok.or.kr/api/StatisticSearch/${encodeURIComponent(key)}/json/kr/1/1000/817Y002/D/${ymd(start)}/${ymd(end)}/${c}`;
     const r=await fetchT(u,{headers:{"User-Agent":"KR-US-Yield-Web/10.0"}},T.ecosYield,`${m} ECOS`);if(!r.ok)throw Error(`${m} ECOS HTTP ${r.status}`);
-    const j=await r.json();if(j.RESULT)throw Error(`${m} ECOS ${j.RESULT.MESSAGE||j.RESULT.CODE}`);
+    const j=await bodyT(r.json(),`${m} ECOS`);if(j.RESULT)throw Error(`${m} ECOS ${j.RESULT.MESSAGE||j.RESULT.CODE}`);
     out[m]=(j.StatisticSearch?.row||[]).map(x=>({date:String(x.TIME).replace(/^(\d{4})(\d{2})(\d{2})$/,"$1-$2-$3"),value:Number(x.DATA_VALUE)})).filter(x=>Number.isFinite(x.value));
   });
   const rr=await Promise.allSettled(jobs);if(rr.every(x=>x.status==="rejected"))throw Error("ECOS 국채금리 조회 실패");return out;
@@ -61,57 +70,86 @@ async function getUS(days){
   const map={"1Y":"BC_1YEAR","2Y":"BC_2YEAR","3Y":"BC_3YEAR","5Y":"BC_5YEAR","10Y":"BC_10YEAR","20Y":"BC_20YEAR","30Y":"BC_30YEAR"};
   for(const yr of years){
     const u=`https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml?data=daily_treasury_yield_curve&field_tdr_date_value=${yr}`;
-    const r=await fetchT(u,{headers:{"User-Agent":"KR-US-Yield-Web/10.0"}},T.treasury,`U.S. Treasury ${yr}`);if(!r.ok)throw Error(`U.S. Treasury HTTP ${r.status}`);const x=await r.text();
+    const r=await fetchT(u,{headers:{"User-Agent":"KR-US-Yield-Web/10.0"}},T.treasury,`U.S. Treasury ${yr}`);if(!r.ok)throw Error(`U.S. Treasury HTTP ${r.status}`);const x=await bodyT(r.text(),`U.S. Treasury ${yr}`);
     for(const em of x.matchAll(/<entry>([\s\S]*?)<\/entry>/g)){const e=em[1],dm=e.match(/<d:NEW_DATE[^>]*>([^<]+)<\/d:NEW_DATE>/);if(!dm)continue;const d=dm[1].slice(0,10);for(const[m,f]of Object.entries(map)){const vm=e.match(new RegExp(`<d:${f}[^>]*>([^<]+)<\\/d:${f}>`));if(vm&&Number.isFinite(Number(vm[1])))out[m].push({date:d,value:Number(vm[1])})}}
   }
   const cut=new Date(Date.now()-days*86400000).toISOString().slice(0,10);for(const m in out)out[m]=out[m].filter(x=>x.date>=cut).sort((a,b)=>a.date.localeCompare(b.date));if(!out["10Y"].length)throw Error("U.S. Treasury 데이터가 비어 있습니다.");return out;
 }
 
+// 정책금리는 최근 N년 구간만 실시간으로 받아 하드코딩 이력 위에 접합합니다.
+// 31년치를 한 번에 받으면 응답 본문이 커서 함수 예산 안에 들어오지 못합니다.
+const POLICY_WINDOW_YEARS=3;
+
+function policyWindowStart(){
+  const d=new Date();d.setUTCFullYear(d.getUTCFullYear()-POLICY_WINDOW_YEARS);
+  return d;
+}
+
+// 실시간 구간을 fallback 이력에 접합합니다.
+// changesOnly 가 경계에서 값이 같은 항목을 걸러내므로 변경일이 중복되지 않습니다.
+function mergePolicy(fallbackRows,liveRows,windowStart){
+  return changesOnly(fallbackRows.filter(x=>x.date<windowStart).concat(liveRows));
+}
+
 async function getPolicyHistory(){
-  // 지연/실패 시 하드코딩 이력으로 즉시 degrade 하고, 출처와 사유를 응답에 함께 남깁니다.
   const fb=getPolicyFallback();
-  const timed=async fn=>{const t0=Date.now();try{return{ok:true,ms:Date.now()-t0,value:await fn()}}catch(e){return{ok:false,ms:Date.now()-t0,error:e.message}}};
+  const ws=policyWindowStart().toISOString().slice(0,10);
+  const timed=async fn=>{const t0=Date.now();try{return{ok:true,ms:Date.now()-t0,value:await fn(ws)}}catch(e){return{ok:false,ms:Date.now()-t0,error:e.message}}};
   let kr,us;
   try{
     [kr,us]=await withTimeout(Promise.all([timed(getKRPolicyHistory),timed(getUSPolicyHistory)]),T.policyAll,"정책금리 조회");
   }catch(e){
-    return{...fb,krSource:"fallback",usSource:"fallback",diag:{kr:{ok:false,error:e.message},us:{ok:false,error:e.message}}};
+    return{...fb,krSource:"fallback",usSource:"fallback",diag:{window:ws,kr:{ok:false,error:e.message},us:{ok:false,error:e.message}}};
   }
-  const krOk=!!(kr.ok&&kr.value.length),usOk=!!(us.ok&&us.value.length);
-  const why=r=>r.error||(r.ok&&!r.value.length?"결과 0건":null);
+  const krOk=!!(kr.ok&&kr.value.length),usOk=!!(us.ok&&us.value.rows.length);
   return{
-    kr:krOk?kr.value:fb.kr,
-    us:usOk?us.value:fb.us,
+    kr:krOk?mergePolicy(fb.kr,kr.value,ws):fb.kr,
+    us:usOk?mergePolicy(fb.us,us.value.rows,ws):fb.us,
     krSource:krOk?"live":"fallback",
     usSource:usOk?"live":"fallback",
-    diag:{kr:{ok:krOk,ms:kr.ms,error:why(kr),n:kr.ok?kr.value.length:0},
-          us:{ok:usOk,ms:us.ms,error:why(us),n:us.ok?us.value.length:0}},
+    diag:{window:ws,
+      kr:{ok:krOk,ms:kr.ms,error:kr.error||null,n:kr.ok?kr.value.length:0},
+      us:{ok:usOk,ms:us.ms,error:us.error||null,n:us.ok?us.value.rows.length:0,
+          fred:us.ok?us.value.fred:null,fomc:us.ok?us.value.fomc:null}},
     usLabel:"미국 기준금리(목표범위 상단)"
   };
 }
 
-async function getKRPolicyHistory(){
-  const key=process.env.ECOS_API_KEY;if(!key)throw Error("ECOS_API_KEY가 없습니다.");const end=new Date(),start=new Date();start.setUTCFullYear(end.getUTCFullYear()-31);
-  const u=`https://ecos.bok.or.kr/api/StatisticSearch/${encodeURIComponent(key)}/json/kr/1/10000/722Y001/D/${ymd(start)}/${ymd(end)}/0101000`;
-  const r=await fetchT(u,{headers:{"User-Agent":"KR-US-Yield-Web/10.0"}},T.ecosPolicy,"ECOS 기준금리");if(!r.ok)throw Error(`ECOS 기준금리 HTTP ${r.status}`);const j=await r.json();if(j.RESULT)throw Error(j.RESULT.MESSAGE||j.RESULT.CODE);
+async function getKRPolicyHistory(ws){
+  const key=process.env.ECOS_API_KEY;if(!key)throw Error("ECOS_API_KEY가 없습니다.");
+  const u=`https://ecos.bok.or.kr/api/StatisticSearch/${encodeURIComponent(key)}/json/kr/1/5000/722Y001/D/${ymd(new Date(ws))}/${ymd(new Date())}/0101000`;
+  const r=await fetchT(u,{headers:{"User-Agent":"KR-US-Yield-Web/10.0"}},T.ecosPolicy,"ECOS 기준금리");if(!r.ok)throw Error(`ECOS 기준금리 HTTP ${r.status}`);
+  const j=await bodyT(r.json(),"ECOS 기준금리");if(j.RESULT)throw Error(j.RESULT.MESSAGE||j.RESULT.CODE);
   return changesOnly((j.StatisticSearch?.row||[]).map(x=>({date:String(x.TIME).replace(/^(\d{4})(\d{2})(\d{2})$/,"$1-$2-$3"),value:Number(x.DATA_VALUE)})).filter(x=>Number.isFinite(x.value)).sort((a,b)=>a.date.localeCompare(b.date)));
 }
 
-async function getUSPolicyHistory(){
-  const start=new Date();start.setUTCFullYear(start.getUTCFullYear()-31);const cosd=start.toISOString().slice(0,10);
-  const r=await fetchT(`https://fred.stlouisfed.org/graph/fredgraph.csv?id=DFEDTARU&cosd=${cosd}`,{headers:{"User-Agent":"KR-US-Yield-Web/10.0"}},T.fred,"FRED 기준금리");if(!r.ok)throw Error(`FRED HTTP ${r.status}`);
-  const csv=await r.text();const daily=csv.trim().split(/\r?\n/).slice(1).map(line=>{const p=line.split(',');return{date:p[0],value:p[1]&&p[1]!=='.'?Number(p[1]):NaN}}).filter(x=>/^\d{4}-\d{2}-\d{2}$/.test(x.date)&&Number.isFinite(x.value));
-  let hist=changesOnly(daily);
-  try{const latest=await withTimeout(getLatestFOMCTargetUpper(),T.fedEnrich,"FOMC 성명 보정");if(latest&&(!hist.length||latest.date>=hist.at(-1).date)){if(!hist.length||hist.at(-1).value!==latest.value)hist.push(latest);else if(latest.date>hist.at(-1).date)hist[hist.length-1]=latest}}catch(e){console.error("Fed latest statement:",e.message)}
-  return hist;
+async function getFredUpper(ws){
+  const r=await fetchT(`https://fred.stlouisfed.org/graph/fredgraph.csv?id=DFEDTARU&cosd=${ws}`,{headers:{"User-Agent":"KR-US-Yield-Web/10.0"}},T.fred,"FRED 기준금리");if(!r.ok)throw Error(`FRED HTTP ${r.status}`);
+  const csv=await bodyT(r.text(),"FRED 기준금리");
+  return changesOnly(csv.trim().split(/\r?\n/).slice(1).map(line=>{const p=line.split(',');return{date:p[0],value:p[1]&&p[1]!=='.'?Number(p[1]):NaN}}).filter(x=>/^\d{4}-\d{2}-\d{2}$/.test(x.date)&&Number.isFinite(x.value)));
+}
+
+// FRED 는 새 목표범위의 효력발생일 전까지 이전 값을 보입니다.
+// 두 소스를 병렬로 받아 하나만 살아도 최신 금리가 반영되게 합니다.
+async function getUSPolicyHistory(ws){
+  const [fredR,fomcR]=await Promise.allSettled([getFredUpper(ws),withTimeout(getLatestFOMCTargetUpper(),T.fedEnrich,"FOMC 성명")]);
+  const rows=fredR.status==="fulfilled"?[...fredR.value]:[];
+  const fomc=fomcR.status==="fulfilled"?fomcR.value:null;
+  if(fomc)rows.push(fomc);
+  if(!rows.length)throw Error(`FRED: ${fredR.reason?.message}; FOMC: ${fomcR.reason?.message}`);
+  rows.sort((a,b)=>a.date.localeCompare(b.date));
+  return{rows,
+    fred:fredR.status==="fulfilled"?`${fredR.value.length}건`:`실패: ${fredR.reason?.message}`,
+    fomc:fomc?`${fomc.date} ${fomc.value}`:`실패: ${fomcR.reason?.message}`};
 }
 
 async function getLatestFOMCTargetUpper(){
-  const home=await fetchT("https://www.federalreserve.gov/monetarypolicy.htm",{headers:{"User-Agent":"Mozilla/5.0 KR-US-Yield-Web/10.0"},cache:"no-store"},T.fedPage,"Fed 통화정책 페이지");if(!home.ok)throw Error(`Fed page HTTP ${home.status}`);const html=await home.text();
+  const home=await fetchT("https://www.federalreserve.gov/monetarypolicy.htm",{headers:{"User-Agent":"Mozilla/5.0 KR-US-Yield-Web/10.0"},cache:"no-store"},T.fedPage,"Fed 통화정책 페이지");if(!home.ok)throw Error(`Fed page HTTP ${home.status}`);
+  const html=await bodyT(home.text(),"Fed 통화정책 페이지");
   const ids=[...html.matchAll(/monetary(\d{8})a\.htm/gi)].map(m=>m[1]).sort().reverse();if(!ids.length)throw Error("FOMC statement not found");
   const id=ids[0],href=`https://www.federalreserve.gov/newsevents/pressreleases/monetary${id}a.htm`;
   const rr=await fetchT(href,{headers:{"User-Agent":"Mozilla/5.0 KR-US-Yield-Web/10.0"},cache:"no-store"},T.fedPage,"FOMC 성명");if(!rr.ok)throw Error(`FOMC statement HTTP ${rr.status}`);
-  const text=decodeHtml(await rr.text()).replace(/<[^>]+>/g," ").replace(/\s+/g," ");
+  const text=decodeHtml(await bodyT(rr.text(),"FOMC 성명")).replace(/<[^>]+>/g," ").replace(/\s+/g," ");
   const m=text.match(/target range[\s\S]{0,240}?to\s+((?:\d+\s*[- ]\s*)?\d+\/\d+|\d+(?:\.\d+)?)\s*(?:percent|per cent)/i);if(!m)throw Error("FOMC target range parse failed");
   return{date:`${id.slice(0,4)}-${id.slice(4,6)}-${id.slice(6,8)}`,value:parseRate(m[1])};
 }

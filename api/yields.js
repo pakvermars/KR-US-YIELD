@@ -79,6 +79,8 @@ async function getUS(days){
 // 정책금리는 최근 N년 구간만 실시간으로 받아 하드코딩 이력 위에 접합합니다.
 // 31년치를 한 번에 받으면 응답 본문이 커서 함수 예산 안에 들어오지 못합니다.
 const POLICY_WINDOW_YEARS=3;
+// federalreserve.gov 는 비브라우저 UA 를 걸러내므로 브라우저형으로 보냅니다.
+const FED_HEADERS={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36","cache":"no-store"};
 
 function policyWindowStart(){
   const d=new Date();d.setUTCFullYear(d.getUTCFullYear()-POLICY_WINDOW_YEARS);
@@ -87,37 +89,42 @@ function policyWindowStart(){
 
 // 실시간 데이터를 fallback 이력에 접합합니다.
 // windowRows(구간 전체를 담는 소스)가 있을 때만 그 구간을 대체합니다.
-// latest(최신 1건짜리 소스)만 있으면 이력은 그대로 두고 최신 변경만 덧붙입니다.
-// 이 구분이 없으면 최신 1건이 구간 전체를 덮어써 과거 변경 이력이 사라집니다.
-// changesOnly 가 경계에서 값이 같은 항목을 걸러내므로 변경일은 중복되지 않습니다.
-function mergePolicy(fallbackRows,windowRows,latest,windowStart){
+// extraRows(구간을 보장하지 않는 추가 관측치)는 이력을 지우지 않고 덧붙이기만 합니다.
+// 이 구분이 없으면 관측치 몇 건이 구간 전체를 덮어써 과거 변경 이력이 사라집니다.
+// changesOnly 가 값이 같은 연속 항목을 걸러내므로 변경일은 중복되지 않습니다.
+function mergePolicy(fallbackRows,windowRows,windowFrom,extraRows){
   const base=windowRows.length
-    ? fallbackRows.filter(x=>x.date<windowStart).concat(windowRows)
+    ? fallbackRows.filter(x=>x.date<windowFrom).concat(windowRows)
     : fallbackRows.slice();
-  if(latest)base.push(latest);
-  base.sort((a,b)=>a.date.localeCompare(b.date));
-  return changesOnly(base);
+  const all=base.concat(extraRows||[]);
+  all.sort((a,b)=>a.date.localeCompare(b.date));
+  return changesOnly(all);
 }
 
 async function getPolicyHistory(){
   const fb=getPolicyFallback();
   const ws=policyWindowStart().toISOString().slice(0,10);
-  const timed=async fn=>{const t0=Date.now();try{return{ok:true,ms:Date.now()-t0,value:await fn(ws)}}catch(e){return{ok:false,ms:Date.now()-t0,error:e.message}}};
+  const usAfter=fb.us.length?fb.us.at(-1).date:ws;
+  const timed=async fn=>{const t0=Date.now();try{return{ok:true,ms:Date.now()-t0,value:await fn()}}catch(e){return{ok:false,ms:Date.now()-t0,error:e.message}}};
   let kr,us;
   try{
-    [kr,us]=await withTimeout(Promise.all([timed(getKRPolicyHistory),timed(getUSPolicyHistory)]),T.policyAll,"정책금리 조회");
+    [kr,us]=await withTimeout(Promise.all([
+      timed(()=>getKRPolicyHistory(ws)),
+      timed(()=>getUSPolicyHistory(ws,usAfter))
+    ]),T.policyAll,"정책금리 조회");
   }catch(e){
     return{...fb,krSource:"fallback",usSource:"fallback",diag:{window:ws,kr:{ok:false,error:e.message},us:{ok:false,error:e.message}}};
   }
-  const krOk=!!(kr.ok&&kr.value.length),usOk=!!(us.ok&&(us.value.windowRows.length||us.value.latest));
+  const krOk=!!(kr.ok&&kr.value.length);
+  const usOk=!!(us.ok&&(us.value.windowRows.length||us.value.statements.length));
   return{
-    kr:krOk?mergePolicy(fb.kr,kr.value,null,ws):fb.kr,
-    us:usOk?mergePolicy(fb.us,us.value.windowRows,us.value.latest,ws):fb.us,
+    kr:krOk?mergePolicy(fb.kr,kr.value,ws,null):fb.kr,
+    us:usOk?mergePolicy(fb.us,us.value.windowRows,ws,us.value.statements):fb.us,
     krSource:krOk?"live":"fallback",
     usSource:usOk?"live":"fallback",
-    diag:{window:ws,
+    diag:{window:ws,usAfter,
       kr:{ok:krOk,ms:kr.ms,error:kr.error||null,n:kr.ok?kr.value.length:0},
-      us:{ok:usOk,ms:us.ms,error:us.error||null,n:us.ok?us.value.windowRows.length:0,
+      us:{ok:usOk,ms:us.ms,error:us.error||null,
           fred:us.ok?us.value.fred:null,fomc:us.ok?us.value.fomc:null}},
     usLabel:"미국 기준금리(목표범위 상단)"
   };
@@ -132,34 +139,55 @@ async function getKRPolicyHistory(ws){
 }
 
 async function getFredUpper(ws){
-  // FRED 는 봇 보호가 걸려 있어 비브라우저 UA 로는 데이터센터 IP 에서 응답이 지연됩니다.
-  const r=await fetchT(`https://fred.stlouisfed.org/graph/fredgraph.csv?id=DFEDTARU&cosd=${ws}`,{headers:{"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36","Accept":"text/csv,text/plain,*/*"},cache:"no-store"},T.fred,"FRED 기준금리");if(!r.ok)throw Error(`FRED HTTP ${r.status}`);
+  // FRED 는 봇 보호가 걸려 있어 데이터센터 IP 에서는 응답하지 않을 수 있습니다.
+  // 실패해도 FOMC 성명이 이력을 채우므로 선택적 소스로 둡니다.
+  const r=await fetchT(`https://fred.stlouisfed.org/graph/fredgraph.csv?id=DFEDTARU&cosd=${ws}`,{headers:{...FED_HEADERS,"Accept":"text/csv,text/plain,*/*"}},T.fred,"FRED 기준금리");if(!r.ok)throw Error(`FRED HTTP ${r.status}`);
   const csv=await bodyT(r.text(),"FRED 기준금리");
   return changesOnly(csv.trim().split(/\r?\n/).slice(1).map(line=>{const p=line.split(',');return{date:p[0],value:p[1]&&p[1]!=='.'?Number(p[1]):NaN}}).filter(x=>/^\d{4}-\d{2}-\d{2}$/.test(x.date)&&Number.isFinite(x.value)));
 }
 
-// FRED 는 새 목표범위의 효력발생일 전까지 이전 값을 보입니다.
-// 두 소스를 병렬로 받아 하나만 살아도 최신 금리가 반영되게 합니다.
-async function getUSPolicyHistory(ws){
-  const [fredR,fomcR]=await Promise.allSettled([getFredUpper(ws),withTimeout(getLatestFOMCTargetUpper(),T.fedEnrich,"FOMC 성명")]);
+// 하드코딩 이력이 끝난 뒤의 FOMC 성명만 읽습니다.
+// 이력 끝에 이어 붙이기만 하므로 과거 구간을 건드리지 않습니다.
+const MAX_STATEMENTS=16;
+
+async function getUSPolicyHistory(ws,afterDate){
+  const [fredR,stmtR]=await Promise.allSettled([
+    getFredUpper(ws),
+    withTimeout(getFOMCStatements(afterDate),T.fedEnrich,"FOMC 성명")
+  ]);
   const windowRows=fredR.status==="fulfilled"?[...fredR.value]:[];
-  const latest=fomcR.status==="fulfilled"?fomcR.value:null;
-  if(!windowRows.length&&!latest)throw Error(`FRED: ${fredR.reason?.message}; FOMC: ${fomcR.reason?.message}`);
-  return{windowRows,latest,
+  const statements=stmtR.status==="fulfilled"?stmtR.value:[];
+  if(!windowRows.length&&!statements.length)throw Error(`FRED: ${fredR.reason?.message}; FOMC: ${stmtR.reason?.message}`);
+  return{windowRows,statements,
     fred:fredR.status==="fulfilled"?`${fredR.value.length}건`:`실패: ${fredR.reason?.message}`,
-    fomc:latest?`${latest.date} ${latest.value}`:`실패: ${fomcR.reason?.message}`};
+    fomc:stmtR.status==="fulfilled"
+      ?`${statements.length}건${statements.length?` (최신 ${statements.at(-1).date} ${statements.at(-1).value})`:""}`
+      :`실패: ${stmtR.reason?.message}`};
 }
 
-async function getLatestFOMCTargetUpper(){
-  const home=await fetchT("https://www.federalreserve.gov/monetarypolicy.htm",{headers:{"User-Agent":"Mozilla/5.0 KR-US-Yield-Web/10.0"},cache:"no-store"},T.fedPage,"Fed 통화정책 페이지");if(!home.ok)throw Error(`Fed page HTTP ${home.status}`);
-  const html=await bodyT(home.text(),"Fed 통화정책 페이지");
-  const ids=[...html.matchAll(/monetary(\d{8})a\.htm/gi)].map(m=>m[1]).sort().reverse();if(!ids.length)throw Error("FOMC statement not found");
-  const id=ids[0],href=`https://www.federalreserve.gov/newsevents/pressreleases/monetary${id}a.htm`;
-  const rr=await fetchT(href,{headers:{"User-Agent":"Mozilla/5.0 KR-US-Yield-Web/10.0"},cache:"no-store"},T.fedPage,"FOMC 성명");if(!rr.ok)throw Error(`FOMC statement HTTP ${rr.status}`);
-  const text=decodeHtml(await bodyT(rr.text(),"FOMC 성명")).replace(/<[^>]+>/g," ").replace(/\s+/g," ");
-  const m=text.match(/target range[\s\S]{0,240}?to\s+((?:\d+\s*[- ]\s*)?\d+\/\d+|\d+(?:\.\d+)?)\s*(?:percent|per cent)/i);if(!m)throw Error("FOMC target range parse failed");
-  return{date:`${id.slice(0,4)}-${id.slice(4,6)}-${id.slice(6,8)}`,value:parseRate(m[1])};
+async function getFOMCStatements(afterDate){
+  const cal=await fetchT("https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm",{headers:FED_HEADERS},T.fedPage,"FOMC 일정 페이지");
+  if(!cal.ok)throw Error(`FOMC 일정 HTTP ${cal.status}`);
+  const html=await bodyT(cal.text(),"FOMC 일정 페이지");
+  const ids=[...new Set([...html.matchAll(/monetary(\d{8})a\.htm/gi)].map(m=>m[1]))]
+    .filter(id=>isoDate(id)>afterDate).sort().slice(-MAX_STATEMENTS);
+  if(!ids.length)return[];
+  const rr=await Promise.allSettled(ids.map(readFOMCStatement));
+  const rows=rr.filter(x=>x.status==="fulfilled").map(x=>x.value);
+  if(!rows.length)throw Error(`성명 ${ids.length}건 모두 파싱 실패: ${rr[0].reason?.message}`);
+  return rows.sort((a,b)=>a.date.localeCompare(b.date));
 }
+
+async function readFOMCStatement(id){
+  const r=await fetchT(`https://www.federalreserve.gov/newsevents/pressreleases/monetary${id}a.htm`,{headers:FED_HEADERS},T.fedPage,`FOMC 성명 ${id}`);
+  if(!r.ok)throw Error(`FOMC 성명 HTTP ${r.status}`);
+  const text=decodeHtml(await bodyT(r.text(),`FOMC 성명 ${id}`)).replace(/<[^>]+>/g," ").replace(/\s+/g," ");
+  const m=text.match(/target range[\s\S]{0,240}?to\s+((?:\d+\s*[- ]\s*)?\d+\/\d+|\d+(?:\.\d+)?)\s*(?:percent|per cent)/i);
+  if(!m)throw Error(`FOMC ${id} target range parse failed`);
+  return{date:isoDate(id),value:parseRate(m[1])};
+}
+
+function isoDate(id){return `${id.slice(0,4)}-${id.slice(4,6)}-${id.slice(6,8)}`}
 function decodeHtml(s){return s.replace(/&frasl;|&#8260;/gi,"/").replace(/&ndash;|&#8211;|&minus;/gi,"-").replace(/&nbsp;|&#160;/gi," ").replace(/&frac14;/gi,"1/4").replace(/&frac12;/gi,"1/2").replace(/&frac34;/gi,"3/4")}
 function parseRate(s){s=String(s).trim().replace(/\s+/g," ");let m=s.match(/^(\d+)\s*[- ]\s*(\d+)\/(\d+)$/);if(m)return Number(m[1])+Number(m[2])/Number(m[3]);m=s.match(/^(\d+)\/(\d+)$/);if(m)return Number(m[1])/Number(m[2]);return Number(s)}
 function changesOnly(rows){const out=[];let prev;for(const x of rows){if(!Number.isFinite(x.value))continue;if(prev===undefined||x.value!==prev){out.push({date:x.date,value:x.value});prev=x.value}}return out}

@@ -35,7 +35,7 @@ export default async function handler(req,res){
     const mats=["1Y","2Y","3Y","5Y","10Y","20Y","30Y"],latest={kr:{},us:{}};
     for(const m of mats){latest.kr[m]=lt(kr[m]||[]);latest.us[m]=lt(us[m]||[])}
     res.setHeader("Cache-Control","s-maxage=60, stale-while-revalidate=120");
-    res.status(200).json({latestDates:{kr:latest.kr["10Y"].date,us:latest.us["10Y"].date},latest,policyHistory:policy,policySource:{kr:policy.krSource||"live",us:policy.usSource||"live"},errors});
+    res.status(200).json({latestDates:{kr:latest.kr["10Y"].date,us:latest.us["10Y"].date},latest,policyHistory:policy,policySource:{kr:policy.krSource||"live",us:policy.usSource||"live"},policyDiag:policy.diag||null,errors});
   }catch(e){res.status(500).json({error:e.message||"server error"})}
 }
 
@@ -68,21 +68,24 @@ async function getUS(days){
 }
 
 async function getPolicyHistory(){
-  // 지연/실패 시 하드코딩 이력으로 즉시 degrade 하고, 출처를 policySource 로 알립니다.
+  // 지연/실패 시 하드코딩 이력으로 즉시 degrade 하고, 출처와 사유를 응답에 함께 남깁니다.
   const fb=getPolicyFallback();
-  let krR,usR;
+  const timed=async fn=>{const t0=Date.now();try{return{ok:true,ms:Date.now()-t0,value:await fn()}}catch(e){return{ok:false,ms:Date.now()-t0,error:e.message}}};
+  let kr,us;
   try{
-    [krR,usR]=await withTimeout(Promise.allSettled([getKRPolicyHistory(),getUSPolicyHistory()]),T.policyAll,"정책금리 조회");
-  }catch(_){
-    return{...fb,krSource:"fallback",usSource:"fallback"};
+    [kr,us]=await withTimeout(Promise.all([timed(getKRPolicyHistory),timed(getUSPolicyHistory)]),T.policyAll,"정책금리 조회");
+  }catch(e){
+    return{...fb,krSource:"fallback",usSource:"fallback",diag:{kr:{ok:false,error:e.message},us:{ok:false,error:e.message}}};
   }
-  const krOk=krR.status==="fulfilled"&&krR.value.length;
-  const usOk=usR.status==="fulfilled"&&usR.value.length;
+  const krOk=!!(kr.ok&&kr.value.length),usOk=!!(us.ok&&us.value.length);
+  const why=r=>r.error||(r.ok&&!r.value.length?"결과 0건":null);
   return{
-    kr:krOk?krR.value:fb.kr,
-    us:usOk?usR.value:fb.us,
+    kr:krOk?kr.value:fb.kr,
+    us:usOk?us.value:fb.us,
     krSource:krOk?"live":"fallback",
     usSource:usOk?"live":"fallback",
+    diag:{kr:{ok:krOk,ms:kr.ms,error:why(kr),n:kr.ok?kr.value.length:0},
+          us:{ok:usOk,ms:us.ms,error:why(us),n:us.ok?us.value.length:0}},
     usLabel:"미국 기준금리(목표범위 상단)"
   };
 }

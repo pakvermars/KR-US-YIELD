@@ -1,5 +1,5 @@
 // 타임아웃 예산(ms). 모든 외부 호출은 반드시 이 안에서 끝나거나 중단됩니다.
-const T={ecosYield:8000,treasury:8000,ecosPolicy:9000,fred:9000,fedPage:6000,fedEnrich:13000,policyAll:20000};
+const T={ecosYield:8000,treasury:8000,ecosPolicy:9000,fred:6000,fedPage:6000,fedEnrich:13000,policyAll:20000};
 
 // 응답하지 않고 매달리는 업스트림을 확실히 끊습니다.
 // AbortSignal.timeout 이 없으면 try/catch 가 영원히 발동하지 않습니다.
@@ -85,10 +85,18 @@ function policyWindowStart(){
   return d;
 }
 
-// 실시간 구간을 fallback 이력에 접합합니다.
-// changesOnly 가 경계에서 값이 같은 항목을 걸러내므로 변경일이 중복되지 않습니다.
-function mergePolicy(fallbackRows,liveRows,windowStart){
-  return changesOnly(fallbackRows.filter(x=>x.date<windowStart).concat(liveRows));
+// 실시간 데이터를 fallback 이력에 접합합니다.
+// windowRows(구간 전체를 담는 소스)가 있을 때만 그 구간을 대체합니다.
+// latest(최신 1건짜리 소스)만 있으면 이력은 그대로 두고 최신 변경만 덧붙입니다.
+// 이 구분이 없으면 최신 1건이 구간 전체를 덮어써 과거 변경 이력이 사라집니다.
+// changesOnly 가 경계에서 값이 같은 항목을 걸러내므로 변경일은 중복되지 않습니다.
+function mergePolicy(fallbackRows,windowRows,latest,windowStart){
+  const base=windowRows.length
+    ? fallbackRows.filter(x=>x.date<windowStart).concat(windowRows)
+    : fallbackRows.slice();
+  if(latest)base.push(latest);
+  base.sort((a,b)=>a.date.localeCompare(b.date));
+  return changesOnly(base);
 }
 
 async function getPolicyHistory(){
@@ -101,15 +109,15 @@ async function getPolicyHistory(){
   }catch(e){
     return{...fb,krSource:"fallback",usSource:"fallback",diag:{window:ws,kr:{ok:false,error:e.message},us:{ok:false,error:e.message}}};
   }
-  const krOk=!!(kr.ok&&kr.value.length),usOk=!!(us.ok&&us.value.rows.length);
+  const krOk=!!(kr.ok&&kr.value.length),usOk=!!(us.ok&&(us.value.windowRows.length||us.value.latest));
   return{
-    kr:krOk?mergePolicy(fb.kr,kr.value,ws):fb.kr,
-    us:usOk?mergePolicy(fb.us,us.value.rows,ws):fb.us,
+    kr:krOk?mergePolicy(fb.kr,kr.value,null,ws):fb.kr,
+    us:usOk?mergePolicy(fb.us,us.value.windowRows,us.value.latest,ws):fb.us,
     krSource:krOk?"live":"fallback",
     usSource:usOk?"live":"fallback",
     diag:{window:ws,
       kr:{ok:krOk,ms:kr.ms,error:kr.error||null,n:kr.ok?kr.value.length:0},
-      us:{ok:usOk,ms:us.ms,error:us.error||null,n:us.ok?us.value.rows.length:0,
+      us:{ok:usOk,ms:us.ms,error:us.error||null,n:us.ok?us.value.windowRows.length:0,
           fred:us.ok?us.value.fred:null,fomc:us.ok?us.value.fomc:null}},
     usLabel:"미국 기준금리(목표범위 상단)"
   };
@@ -133,14 +141,12 @@ async function getFredUpper(ws){
 // 두 소스를 병렬로 받아 하나만 살아도 최신 금리가 반영되게 합니다.
 async function getUSPolicyHistory(ws){
   const [fredR,fomcR]=await Promise.allSettled([getFredUpper(ws),withTimeout(getLatestFOMCTargetUpper(),T.fedEnrich,"FOMC 성명")]);
-  const rows=fredR.status==="fulfilled"?[...fredR.value]:[];
-  const fomc=fomcR.status==="fulfilled"?fomcR.value:null;
-  if(fomc)rows.push(fomc);
-  if(!rows.length)throw Error(`FRED: ${fredR.reason?.message}; FOMC: ${fomcR.reason?.message}`);
-  rows.sort((a,b)=>a.date.localeCompare(b.date));
-  return{rows,
+  const windowRows=fredR.status==="fulfilled"?[...fredR.value]:[];
+  const latest=fomcR.status==="fulfilled"?fomcR.value:null;
+  if(!windowRows.length&&!latest)throw Error(`FRED: ${fredR.reason?.message}; FOMC: ${fomcR.reason?.message}`);
+  return{windowRows,latest,
     fred:fredR.status==="fulfilled"?`${fredR.value.length}건`:`실패: ${fredR.reason?.message}`,
-    fomc:fomc?`${fomc.date} ${fomc.value}`:`실패: ${fomcR.reason?.message}`};
+    fomc:latest?`${latest.date} ${latest.value}`:`실패: ${fomcR.reason?.message}`};
 }
 
 async function getLatestFOMCTargetUpper(){

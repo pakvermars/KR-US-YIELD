@@ -1,5 +1,5 @@
 // 타임아웃 예산(ms). 모든 외부 호출은 반드시 이 안에서 끝나거나 중단됩니다.
-const T={ecosYield:8000,treasury:8000,ecosPolicy:9000,fred:8000,fedPage:6000,fedEnrich:13000,policyAll:20000};
+const T={ecosYield:8000,treasury:8000,ecosPolicy:9000,fred:6000,fedPage:6000,fedEnrich:13000,policyAll:20000};
 
 // 응답하지 않고 매달리는 업스트림을 확실히 끊습니다.
 // AbortSignal.timeout 이 없으면 try/catch 가 영원히 발동하지 않습니다.

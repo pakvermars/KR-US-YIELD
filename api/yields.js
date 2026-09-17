@@ -1,5 +1,5 @@
 // 타임아웃 예산(ms). 모든 외부 호출은 반드시 이 안에서 끝나거나 중단됩니다.
-const T={ecosYield:8000,treasury:8000,ecosPolicy:9000,fred:6000,fedPage:6000,fedEnrich:13000,policyAll:20000};
+const T={ecosYield:8000,treasury:8000,ecosPolicy:9000,fred:8000,fedPage:6000,fedEnrich:13000,policyAll:20000};
 
 // 응답하지 않고 매달리는 업스트림을 확실히 끊습니다.
 // AbortSignal.timeout 이 없으면 try/catch 가 영원히 발동하지 않습니다.
@@ -132,7 +132,8 @@ async function getKRPolicyHistory(ws){
 }
 
 async function getFredUpper(ws){
-  const r=await fetchT(`https://fred.stlouisfed.org/graph/fredgraph.csv?id=DFEDTARU&cosd=${ws}`,{headers:{"User-Agent":"KR-US-Yield-Web/10.0"}},T.fred,"FRED 기준금리");if(!r.ok)throw Error(`FRED HTTP ${r.status}`);
+  // FRED 는 봇 보호가 걸려 있어 비브라우저 UA 로는 데이터센터 IP 에서 응답이 지연됩니다.
+  const r=await fetchT(`https://fred.stlouisfed.org/graph/fredgraph.csv?id=DFEDTARU&cosd=${ws}`,{headers:{"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36","Accept":"text/csv,text/plain,*/*"},cache:"no-store"},T.fred,"FRED 기준금리");if(!r.ok)throw Error(`FRED HTTP ${r.status}`);
   const csv=await bodyT(r.text(),"FRED 기준금리");
   return changesOnly(csv.trim().split(/\r?\n/).slice(1).map(line=>{const p=line.split(',');return{date:p[0],value:p[1]&&p[1]!=='.'?Number(p[1]):NaN}}).filter(x=>/^\d{4}-\d{2}-\d{2}$/.test(x.date)&&Number.isFinite(x.value)));
 }

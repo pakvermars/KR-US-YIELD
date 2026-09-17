@@ -188,7 +188,20 @@ async function readFOMCStatement(id){
 }
 
 function isoDate(id){return `${id.slice(0,4)}-${id.slice(4,6)}-${id.slice(6,8)}`}
-function decodeHtml(s){return s.replace(/&frasl;|&#8260;/gi,"/").replace(/&ndash;|&#8211;|&minus;/gi,"-").replace(/&nbsp;|&#160;/gi," ").replace(/&frac14;/gi,"1/4").replace(/&frac12;/gi,"1/2").replace(/&frac34;/gi,"3/4")}
+// FOMC 성명은 회차마다 표기가 섞입니다. 2026-01/03/04 성명은 ASCII 하이픈이 아니라
+// U+2011(non-breaking hyphen)로 "3‑1/2" 처럼 적어 목표범위 파싱이 실패했습니다.
+// 엔티티뿐 아니라 유니코드 대시/공백/분수 문자까지 ASCII 로 정규화합니다.
+function decodeHtml(s){
+  return s
+    .replace(/&frasl;|&#8260;/gi,"/")
+    .replace(/&ndash;|&#8211;|&minus;|&#8722;|&#8208;|&#8209;|&hyphen;/gi,"-")
+    .replace(/&nbsp;|&#160;/gi," ")
+    .replace(/&frac14;/gi,"1/4").replace(/&frac12;/gi,"1/2").replace(/&frac34;/gi,"3/4")
+    .replace(/[‐-―−]/g,"-")
+    .replace(/[    ]/g," ")
+    .replace(/⁄/g,"/")
+    .replace(/¼/g,"1/4").replace(/½/g,"1/2").replace(/¾/g,"3/4");
+}
 function parseRate(s){s=String(s).trim().replace(/\s+/g," ");let m=s.match(/^(\d+)\s*[- ]\s*(\d+)\/(\d+)$/);if(m)return Number(m[1])+Number(m[2])/Number(m[3]);m=s.match(/^(\d+)\/(\d+)$/);if(m)return Number(m[1])/Number(m[2]);return Number(s)}
 function changesOnly(rows){const out=[];let prev;for(const x of rows){if(!Number.isFinite(x.value))continue;if(prev===undefined||x.value!==prev){out.push({date:x.date,value:x.value});prev=x.value}}return out}
 
